@@ -1,0 +1,107 @@
+The graph only shows when a resource was created, not why, so to track the why use triggerAsyncId.
+
+before(asyncId)#
+
+asyncId <number>
+When an asynchronous operation is initiated (such as a TCP server receiving a new connection) or completes (such as writing data to disk) a callback is called to notify the user. The before callback is called just before said callback is executed. asyncId is the unique identifier assigned to the resource about to execute the callback.
+
+The before callback will be called 0 to N times. The before callback will typically be called 0 times if the asynchronous operation was cancelled or, for example, if no connections are received by a TCP server. Persistent asynchronous resources like a TCP server will typically call the before callback multiple times, while other operations like fs.open() will call it only once.
+
+after(asyncId)#
+
+asyncId <number>
+Called immediately after the callback specified in before is completed.
+
+If an uncaught exception occurs during execution of the callback, then after will run after the 'uncaughtException' event is emitted or a domain's handler runs.
+
+destroy(asyncId)#
+
+asyncId <number>
+Called after the resource corresponding to asyncId is destroyed. It is also called asynchronously from the embedder API emitDestroy().
+
+Some resources depend on garbage collection for cleanup, so if a reference is made to the resource object passed to init it is possible that destroy will never be called, causing a memory leak in the application. If the resource does not depend on garbage collection, then this will not be an issue.
+
+promiseResolve(asyncId)#
+
+Added in: v8.6.0
+asyncId <number>
+Called when the resolve function passed to the Promise constructor is invoked (either directly or through other means of resolving a promise).
+
+resolve() does not do any observable synchronous work.
+
+The Promise is not necessarily fulfilled or rejected at this point if the Promise was resolved by assuming the state of another Promise.
+
+new Promise((resolve) => resolve(true)).then((a) => {});
+calls the following callbacks:
+
+init for PROMISE with id 5, trigger id: 1
+  promise resolve 5      # corresponds to resolve(true)
+init for PROMISE with id 6, trigger id: 5  # the Promise returned by then()
+  before 6               # the then() callback is entered
+  promise resolve 6      # the then() callback resolves the promise by returning
+  after 6
+async_hooks.executionAsyncId()#
+
+History
+Returns: <number> The asyncId of the current execution context. Useful to track when something calls.
+const async_hooks = require('async_hooks');
+
+console.log(async_hooks.executionAsyncId());  // 1 - bootstrap
+fs.open(path, 'r', (err, fd) => {
+  console.log(async_hooks.executionAsyncId());  // 6 - open()
+});
+The ID returned from executionAsyncId() is related to execution timing, not causality (which is covered by triggerAsyncId()):
+
+const server = net.createServer((conn) => {
+  // Returns the ID of the server, not of the new connection, because the
+  // callback runs in the execution scope of the server's MakeCallback().
+  async_hooks.executionAsyncId();
+
+}).listen(port, () => {
+  // Returns the ID of a TickObject (i.e. process.nextTick()) because all
+  // callbacks passed to .listen() are wrapped in a nextTick().
+  async_hooks.executionAsyncId();
+});
+Promise contexts may not get precise executionAsyncIds by default. See the section on promise execution tracking.
+
+async_hooks.triggerAsyncId()#
+
+Returns: <number> The ID of the resource responsible for calling the callback that is currently being executed.
+const server = net.createServer((conn) => {
+  // The resource that caused (or triggered) this callback to be called
+  // was that of the new connection. Thus the return value of triggerAsyncId()
+  // is the asyncId of "conn".
+  async_hooks.triggerAsyncId();
+
+}).listen(port, () => {
+  // Even though all callbacks passed to .listen() are wrapped in a nextTick()
+  // the callback itself exists because the call to the server's .listen()
+  // was made. So the return value would be the ID of the server.
+  async_hooks.triggerAsyncId();
+});
+Promise contexts may not get valid triggerAsyncIds by default. See the section on promise execution tracking.
+
+Promise execution tracking#
+
+By default, promise executions are not assigned asyncIds due to the relatively expensive nature of the promise introspection API provided by V8. This means that programs using promises or async/await will not get correct execution and trigger ids for promise callback contexts by default.
+
+const ah = require('async_hooks');
+Promise.resolve(1729).then(() => {
+  console.log(`eid ${ah.executionAsyncId()} tid ${ah.triggerAsyncId()}`);
+});
+// produces:
+// eid 1 tid 0
+Observe that the then() callback claims to have executed in the context of the outer scope even though there was an asynchronous hop involved. Also, the triggerAsyncId value is 0, which means that we are missing context about the resource that caused (triggered) the then() callback to be executed.
+
+Installing async hooks via async_hooks.createHook enables promise execution tracking:
+
+const ah = require('async_hooks');
+ah.createHook({ init() {} }).enable(); // forces PromiseHooks to be enabled.
+Promise.resolve(1729).then(() => {
+  console.log(`eid ${ah.executionAsyncId()} tid ${ah.triggerAsyncId()}`);
+});
+// produces:
+// eid 7 tid 6
+In this example, adding any actual hook function enabled the tracking of promises. There are two promises in the example above; the promise created by Promise.resolve() and the promise returned by the call to then(). In the example above, the first promise got the asyncId 6 and the latter got asyncId 7. During the execution of the then() callback, we are executing in the context of promise with asyncId 7. This promise was triggered by async resource 6.
+
+Another subtlety with promises is that before and after callbacks are run only on chained promises. That means promises not created by then()/catch() will not have the before and after callbacks fired on them. For more details see the details of the V8 PromiseHooks API.
